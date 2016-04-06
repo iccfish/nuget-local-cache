@@ -16,6 +16,11 @@ namespace FishSite.NugetWarpper
 
 	public class NugetCache : IHttpModule
 	{
+		private bool _enableGzip;
+		HttpRequest request;
+		HttpApplication context;
+		HttpResponse response;
+
 		/// <summary>
 		/// 初始化模块，并使其为处理请求做好准备。
 		/// </summary>
@@ -27,15 +32,18 @@ namespace FishSite.NugetWarpper
 
 		private void Context_BeginRequest(object sender, EventArgs e)
 		{
-			var context = sender as HttpApplication;
-			var request = context.Request;
-			var response = context.Response;
+			context = sender as HttpApplication;
+			request = context.Request;
+			response = context.Response;
 			var uri = context.Request.Url;
+
+			//是否可以用GZIP？
+			_enableGzip = (request.Headers["Accept-Encoding"] ?? "").IndexOf("gzip") != -1;
 
 			try
 			{
 				//要求没有查询并符合规则才处理
-				if (!uri.Query.IsNullOrEmpty() || context.Request.HttpMethod != "GET" || !Regex.IsMatch(uri.LocalPath, @"^[a-z\d/\-_\.]+\.(json|nupkg)$", RegexOptions.IgnoreCase))
+				if (!uri.Query.IsNullOrEmpty() || context.Request.HttpMethod != "GET" || !Regex.IsMatch(uri.LocalPath, @"^[a-z\d/\-_\.]+\.(json|nupkg)(.*?)$", RegexOptions.IgnoreCase))
 				{
 					DirectProxy(context);
 				}
@@ -62,11 +70,9 @@ namespace FishSite.NugetWarpper
 
 			var localRoot = HostingEnvironment.ApplicationPhysicalPath;
 			var localPath = request.Url.LocalPath.Replace('/', '\\').TrimStart('\\');
-			var localCacheFile = Path.Combine(localRoot, localPath);
+			var localCacheFile = Path.Combine(localRoot, localPath).Replace("-gz\\", "\\");
 			var meta = localCacheFile + ".meta";
 			var cacheKey = "nuget_" + localPath;
-			var processed = false;
-
 
 			//load from cache
 			var cache = (MetaData)HttpRuntime.Cache[cacheKey];
@@ -99,7 +105,6 @@ namespace FishSite.NugetWarpper
 				});
 			}
 			//是否需要更新缓存？
-			byte[] buffer = null;
 			if (cache.LastUpdate == null || (!cache.NoCheckUpdate && cache.LastUpdate.Value.Date < DateTime.Today) || !File.Exists(localCacheFile))
 			{
 				if (File.Exists(meta)) File.Delete(meta);
@@ -167,32 +172,29 @@ namespace FishSite.NugetWarpper
 							var br = new StreamReader(webresponse.GetResponseStream(), Encoding.UTF8);
 							var content = br.ReadToEnd();
 							content = ReplaceHost(content);
-							File.WriteAllBytes(localCacheFile, buffer = Encoding.UTF8.GetBytes(content));
+
+							var buffer = Encoding.UTF8.GetBytes(content);
+
+							var bufferGz = buffer.Compress();
+							File.WriteAllBytes(localCacheFile, buffer);
+							File.WriteAllBytes(localCacheFile + ".gz", bufferGz);
 						}
 						else
 						{
-							//IMPORVED - 直接复制流
-							response.Buffer = false;
-							response.StatusCode = 200;
-							response.SuppressContent = false;
-							response.BufferOutput = false;
-							if (webresponse.ContentLength > 0L)
-								response.AppendHeader("Content-Length", webresponse.ContentLength.ToString());
-							response.Flush();
-
-							var ms = new MemoryStream(Math.Max((int)webresponse.ContentLength, 0x400));
+							//临时文件
+							var tmpfile = localCacheFile + "." + DateTime.Now.Ticks + ".tmp";
 							var tempBuffer = new byte[0x1000];
-							var tempReadCount = 0;
 							var srcStream = webresponse.GetResponseStream();
 
-							while ((tempReadCount = srcStream.Read(tempBuffer, 0, tempBuffer.Length)) > 0)
+							using (var tmp = File.OpenWrite(tmpfile))
 							{
-								ms.Write(tempBuffer, 0, tempReadCount);
-								response.OutputStream.Write(tempBuffer, 0, tempReadCount);
+								var tempReadCount = 0;
+								while ((tempReadCount = srcStream.Read(tempBuffer, 0, tempBuffer.Length)) > 0)
+								{
+									tmp.Write(tempBuffer, 0, tempReadCount);
+								}
 							}
-							processed = true;
-
-							File.WriteAllBytes(localCacheFile, buffer = ms.ToArray());
+							File.Move(tmpfile, localCacheFile);
 						}
 						File.WriteAllText(meta, JsonConvert.SerializeObject(cache));
 					}
@@ -209,28 +211,26 @@ namespace FishSite.NugetWarpper
 				response.Headers.Add("X-FishCache", "HIT");
 			}
 
-			if (processed)
-				return;
-
-			//写入响应
 			foreach (var header in cache.ResponseHeaders)
 			{
 				response.Headers[header.Key] = header.Value;
 			}
-			if (buffer != null)
-				response.BinaryWrite(buffer);
-			else if (File.Exists(localCacheFile))
+
+			//写入响应
+			if (!_enableGzip || !request.Url.GetFileName().EndsWith(".json"))
+			{
 				response.TransmitFile(localCacheFile);
+			}
 			else
 			{
-				response.StatusCode = 502;
-				response.StatusDescription = "Gateway Error.";
+				response.Headers["Content-Encoding"] = "gzip";
+				response.TransmitFile(localCacheFile + ".gz");
 			}
 		}
 
-		static string ReplaceHost(string content)
+		string ReplaceHost(string content)
 		{
-			return Regex.Replace(content, @"https://api\.nuget\.org/(?=packages|v3)", "http://nugetcache.fishlee.net/");
+			return Regex.Replace(content, @"https://api\.nuget\.org/(?=packages|v3)", "http://" + request.Url.Authority + "/");
 		}
 
 		void DirectProxy(HttpApplication context)

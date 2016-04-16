@@ -73,6 +73,7 @@ namespace FishSite.NugetWarpper
 			var localCacheFile = Path.Combine(localRoot, localPath).Replace("-gz\\", "\\");
 			var meta = localCacheFile + ".meta";
 			var cacheKey = "nuget_" + localPath;
+			var responseProcessed = false;
 
 			//load from cache
 			var cache = (MetaData)HttpRuntime.Cache[cacheKey];
@@ -159,7 +160,6 @@ namespace FishSite.NugetWarpper
 					foreach (var header in webresponse.Headers.AllKeys.Where(s => s.StartsWith("x-", StringComparison.OrdinalIgnoreCase)))
 					{
 						cache.ResponseHeaders[header] = webresponse.Headers[header];
-						response.Headers[header] = webresponse.Headers[header];
 					}
 					cache.ETag = webresponse.GetResponseHeader("Etag");
 					cache.LastModified = webresponse.GetResponseHeader("Last-Modified").ToDateTimeNullable();
@@ -186,15 +186,39 @@ namespace FishSite.NugetWarpper
 							var tempBuffer = new byte[0x1000];
 							var srcStream = webresponse.GetResponseStream();
 
+							//write to response at the same time
+							foreach (var header in cache.ResponseHeaders)
+							{
+								response.AddHeader(header.Key, header.Value);
+							}
+							response.BufferOutput = false;
+							if(webresponse.ContentLength>0)
+								response.AddHeader("Content-Length", webresponse.ContentLength.ToString());
+							response.Flush();
+
 							using (var tmp = File.OpenWrite(tmpfile))
 							{
 								var tempReadCount = 0;
 								while ((tempReadCount = srcStream.Read(tempBuffer, 0, tempBuffer.Length)) > 0)
 								{
+									if (!response.IsClientConnected)
+									{
+										break;
+									}
+
 									tmp.Write(tempBuffer, 0, tempReadCount);
+									response.BinaryWrite(tempReadCount == tempBuffer.Length ? tempBuffer : tempBuffer.Take(tempReadCount).ToArray());
 								}
 							}
-							File.Move(tmpfile, localCacheFile);
+							if (!response.IsClientConnected)
+							{
+								File.Delete(tmpfile);
+							}
+							else
+							{
+								File.Move(tmpfile, localCacheFile);
+							}
+							responseProcessed = true;
 						}
 						File.WriteAllText(meta, JsonConvert.SerializeObject(cache));
 					}
@@ -210,6 +234,9 @@ namespace FishSite.NugetWarpper
 			{
 				response.Headers.Add("X-FishCache", "HIT");
 			}
+
+			if (responseProcessed)
+				return;
 
 			foreach (var header in cache.ResponseHeaders)
 			{

@@ -20,6 +20,7 @@ namespace FishSite.NugetWarpper
 		HttpRequest request;
 		HttpApplication context;
 		HttpResponse response;
+		static string _ignorePath = System.Configuration.ConfigurationManager.AppSettings["nuget_ignorepath"];
 
 		/// <summary>
 		/// 初始化模块，并使其为处理请求做好准备。
@@ -34,7 +35,13 @@ namespace FishSite.NugetWarpper
 		{
 			context = sender as HttpApplication;
 			request = context.Request;
+
 			response = context.Response;
+			if (!_ignorePath.IsNullOrEmpty() && Regex.IsMatch(request.Path, _ignorePath))
+			{
+				return;
+			}
+
 			var uri = context.Request.Url;
 
 			//是否可以用GZIP？
@@ -192,7 +199,7 @@ namespace FishSite.NugetWarpper
 								response.AddHeader(header.Key, header.Value);
 							}
 							response.BufferOutput = false;
-							if(webresponse.ContentLength>0)
+							if (webresponse.ContentLength > 0)
 								response.AddHeader("Content-Length", webresponse.ContentLength.ToString());
 							response.Flush();
 
@@ -302,21 +309,5 @@ namespace FishSite.NugetWarpper
 		}
 	}
 
-	public class MetaData
-	{
-		[JsonIgnore]
-		public string CachePath { get; set; }
 
-		public DateTime? LastModified { get; set; }
-
-		public string ETag { get; set; }
-
-		public Dictionary<string, string> ResponseHeaders { get; set; }
-
-		public DateTime? LastUpdate { get; set; }
-
-		public int HitCount { get; set; }
-
-		public bool NoCheckUpdate { get; set; }
-	}
 }
